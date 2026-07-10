@@ -266,52 +266,132 @@ func TestIntegration_BlockPipeline(t *testing.T) {
 	t.Log("✓ 块级流水线测试通过")
 }
 
-// TestIntegration_MultiPeer 验证多节点并发传输。
+// TestIntegration_MultiPeer 验证多节点并发传输——两个客户端同时请求不同分块，互不串数据。
 func TestIntegration_MultiPeer(t *testing.T) {
-	chunkData := []byte("multi-peer test data for concurrent download verification")
+	// Admin 持有两个不同的分块
+	chunk0 := []byte("CHUNK_ZERO: data for client-1 only")
+	chunk1 := []byte("CHUNK_ONE: data for client-2 only")
 
-	// === 管理端 (Seeder) ===
+	// === Admin ===
 	adminCfg := transport.DefaultConfig()
 	adminCfg.ListenPort = 26937
 	adminEngine := transport.New(adminCfg)
 	adminEngine.SetLocalPeerID("seeder")
 
+	adminChunks := map[int][]byte{0: chunk0, 1: chunk1}
 	adminEngine.SetChunkProvider(func(index int) ([]byte, error) {
-		return chunkData, nil
+		d, ok := adminChunks[index]
+		if !ok {
+			return nil, fmt.Errorf("no chunk %d", index)
+		}
+		return d, nil
+	})
+
+	// Admin 收到请求后自动回传数据
+	adminPtr := adminEngine
+	adminEngine.SetCallbacks(transport.Callbacks{
+		OnChunkRequested: func(peerID string, chunkIndex int) {
+			data, ok := adminChunks[chunkIndex]
+			if !ok {
+				return
+			}
+			idx := protocol.BEBytes(uint32(chunkIndex))
+			payload := append(idx[:], data...)
+			adminPtr.SendRaw(peerID, protocol.EncodeRaw(protocol.TypeChunkDataBin, payload))
+			t.Logf("[Admin] 发送 chunk-%d (%d 字节) → %s", chunkIndex, len(data), peerID)
+		},
 	})
 
 	adminEngine.Start()
 	defer adminEngine.Stop()
 
-	// === 两个客户端 ===
-	clients := []*transport.Engine{}
-	for i := 1; i <= 2; i++ {
+	// === 两个客户端，各有独立的存储 ===
+	type client struct {
+		engine *transport.Engine
+		store  *testStore
+		got    bool
+	}
+
+	clients := make([]*client, 2)
+	for i := 0; i < 2; i++ {
 		cfg := transport.DefaultConfig()
-		cfg.ListenPort = 26937 + i
+		cfg.ListenPort = 26938 + i
 		engine := transport.New(cfg)
-		engine.SetLocalPeerID(fmt.Sprintf("client-%d", i))
+		engine.SetLocalPeerID(fmt.Sprintf("client-%d", i+1))
+		store := newTestStore(1)
+		engine.SetCallbacks(transport.Callbacks{
+			OnChunkReceived: func(peerID string, chunkIndex int, data []byte) {
+				clients[i].got = true
+				store.SaveChunk(chunkIndex, data)
+				t.Logf("[Client-%d] 收到 chunk-%d (%d 字节)", i+1, chunkIndex, len(data))
+			},
+		})
 		engine.Start()
-		clients = append(clients, engine)
+		clients[i] = &client{engine: engine, store: store}
 		defer engine.Stop()
 	}
 
-	// 两个客户端连接管理端
+	// 两个客户端连接 Admin
 	for _, c := range clients {
-		c.Connect("seeder", "127.0.0.1", 26937)
+		c.engine.Connect("seeder", "127.0.0.1", 26937)
 	}
-	time.Sleep(300 * time.Millisecond)
 
-	// 验证两个客户端都连接成功
-	for _, c := range clients {
-		if !c.IsConnected("seeder") {
-			t.Errorf("%s 应已连接到管理端", c.LocalPeerID())
+	// 验证连接完成——每个客户端有 4 条 TCP 连接，需要等 admin 侧 handleIncoming 全部完成
+	time.Sleep(800 * time.Millisecond)
+	if len(adminEngine.Peers()) != 2 {
+		t.Fatalf("Admin 应有 2 个节点，实际: %d", len(adminEngine.Peers()))
+	}
+	for i, c := range clients {
+		if !c.engine.IsConnected("seeder") {
+			t.Fatalf("Client-%d 未连接", i+1)
 		}
 	}
-	if len(adminEngine.Peers()) != 2 {
-		t.Errorf("管理端应有 2 个节点，实际: %d", len(adminEngine.Peers()))
+
+	// === 并发请求：Client-1 请求 chunk-0, Client-2 请求 chunk-1 ===
+	// 由于连接池 hash(chunkIndex) 分配，两个请求可能走不同 TCP 连接
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		clients[0].engine.RequestChunk("seeder", "hash0", 0)
+	}()
+	go func() {
+		defer wg.Done()
+		clients[1].engine.RequestChunk("seeder", "hash1", 1)
+	}()
+	wg.Wait()
+
+	// 等待数据传输完成，带重试确保异步传输到达
+	for retry := 0; retry < 10 && (!clients[0].got || !clients[1].got); retry++ {
+		time.Sleep(200 * time.Millisecond)
 	}
 
-	t.Log("✓ 多节点并发测试通过")
+	// === 验证：各自收到正确的数据，不能串 ===
+	if !clients[0].got {
+		t.Error("Client-1 没有收到数据")
+	}
+	if !clients[1].got {
+		t.Error("Client-2 没有收到数据")
+	}
+
+	c0, _ := clients[0].store.GetChunk(0)
+	c1, _ := clients[1].store.GetChunk(1)
+
+	if string(c0) != string(chunk0) {
+		t.Errorf("Client-1 数据错误:\n期望: %s\n实际: %s", chunk0, c0)
+	}
+	if string(c1) != string(chunk1) {
+		t.Errorf("Client-2 数据错误:\n期望: %s\n实际: %s", chunk1, c1)
+	}
+	// 关键断言：Client-1 不应该收到 Client-2 的数据
+	if clients[0].store.HasChunk(1) {
+		t.Error("Client-1 收到了 Client-2 的数据——数据串了!")
+	}
+	if clients[1].store.HasChunk(0) {
+		t.Error("Client-2 收到了 Client-1 的数据——数据串了!")
+	}
+
+	t.Log("✓ 多节点并发测试通过（数据无串扰）")
 }
 
 // TestIntegration_RTT 验证 RTT 测量功能。

@@ -163,8 +163,8 @@ func (e *Engine) Connect(peerID, ip string, port int) (*PeerConn, error) {
 
 		pc.Start()
 
-		// Pool connections also send Hello so the remote can identify us
-		if i > 0 {
+		// 所有连接都要发 Hello 让对方识别
+		{
 			hello := protocol.Hello{PeerID: e.LocalPeerID()}
 			if data, err := protocol.Encode(protocol.TypeHello, hello); err == nil {
 				pc.sendRaw(data)
