@@ -2,7 +2,6 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/测试-69个全部通过-brightgreen)](#)
 
 轻量级、可嵌入的 P2P 文件分发协议引擎，专为高吞吐局域网环境设计。**零外部依赖**，仅使用 Go 标准库。
 
