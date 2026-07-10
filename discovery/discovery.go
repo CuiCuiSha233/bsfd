@@ -121,6 +121,9 @@ func IsLocalIP(ip net.IP) bool {
 
 // BroadcastAddr calculates the IPv4 broadcast address for a network.
 func BroadcastAddr(ipNet *net.IPNet) net.IP {
+	if ipNet == nil {
+		return nil
+	}
 	ip := ipNet.IP.To4()
 	if ip == nil {
 		return nil
