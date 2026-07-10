@@ -83,6 +83,17 @@ func (pc *PeerConn) avgRTT() time.Duration {
 
 func (pc *PeerConn) sendRaw(data []byte) error { return pc.send(data) }
 
+func (pc *PeerConn) sendChunkResponse(chunkIndex int, data []byte) error {
+	payload := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(payload[0:4], uint32(chunkIndex))
+	copy(payload[4:], data)
+	frame := protocol.EncodeRaw(protocol.TypeChunkDataBin, payload)
+	if frame == nil {
+		return fmt.Errorf("transport: chunk response payload too large for chunk %d", chunkIndex)
+	}
+	return pc.send(frame)
+}
+
 func (pc *PeerConn) send(data []byte) error {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
@@ -133,7 +144,16 @@ func (pc *PeerConn) handleMessage(msgType byte, payload []byte) {
 	switch msgType {
 	case protocol.TypeChunkRequest:
 		var req protocol.ChunkRequest
-		if protocol.UnmarshalPayload(payload, &req) == nil && pc.cb.onChunkRequested != nil {
+		if protocol.UnmarshalPayload(payload, &req) != nil {
+			break
+		}
+		// Use chunkProvider first: replies on the SAME connection for correct inflight tracking.
+		if pc.chunkProvider != nil {
+			chunkData, err := pc.chunkProvider(req.ChunkIndex)
+			if err == nil && len(chunkData) > 0 {
+				pc.sendChunkResponse(req.ChunkIndex, chunkData)
+			}
+		} else if pc.cb.onChunkRequested != nil {
 			pc.cb.onChunkRequested(req.ChunkIndex)
 		}
 

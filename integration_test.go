@@ -91,20 +91,7 @@ func TestIntegration_AdminToClient(t *testing.T) {
 		return adminStore.GetChunk(index)
 	})
 
-	var adminGotRequest bool
 	adminEngine.SetCallbacks(transport.Callbacks{
-		OnChunkRequested: func(peerID string, chunkIndex int) {
-			adminGotRequest = true
-			t.Logf("[Admin] 收到分块请求: peer=%s chunk=%d", peerID, chunkIndex)
-			// 宿主应用负责在回调中发送数据
-			data, err := adminStore.GetChunk(chunkIndex)
-			if err == nil {
-				// ChunkDataBin 格式: [4B index BE][raw data]
-				idx := protocol.BEBytes(uint32(chunkIndex))
-				payload := append(idx[:], data...)
-				adminEngine.SendRaw(peerID, protocol.EncodeRaw(protocol.TypeChunkDataBin, payload))
-			}
-		},
 		OnPeerConnected: func(peerID string) {
 			t.Logf("[Admin] 节点已连接: %s", peerID)
 		},
@@ -165,9 +152,6 @@ func TestIntegration_AdminToClient(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// === 验证结果 ===
-	if !adminGotRequest {
-		t.Error("Admin 应收到分块请求回调")
-	}
 	if !clientGotChunk {
 		t.Error("Client 应收到分块数据回调")
 	}
@@ -204,13 +188,6 @@ func TestIntegration_BlockPipeline(t *testing.T) {
 
 	adminEngine.SetChunkProvider(func(index int) ([]byte, error) {
 		return chunkData, nil
-	})
-
-	var adminBlockRequests int
-	adminEngine.SetCallbacks(transport.Callbacks{
-		OnChunkRequested: func(peerID string, chunkIndex int) {
-			adminBlockRequests++
-		},
 	})
 
 	adminEngine.Start()
@@ -287,21 +264,7 @@ func TestIntegration_MultiPeer(t *testing.T) {
 		return d, nil
 	})
 
-	// Admin 收到请求后自动回传数据
-	adminPtr := adminEngine
-	adminEngine.SetCallbacks(transport.Callbacks{
-		OnChunkRequested: func(peerID string, chunkIndex int) {
-			data, ok := adminChunks[chunkIndex]
-			if !ok {
-				return
-			}
-			idx := protocol.BEBytes(uint32(chunkIndex))
-			payload := append(idx[:], data...)
-			adminPtr.SendRaw(peerID, protocol.EncodeRaw(protocol.TypeChunkDataBin, payload))
-			t.Logf("[Admin] 发送 chunk-%d (%d 字节) → %s", chunkIndex, len(data), peerID)
-		},
-	})
-
+	// chunkProvider handles responses automatically — no OnChunkRequested callback needed.
 	adminEngine.Start()
 	defer adminEngine.Stop()
 

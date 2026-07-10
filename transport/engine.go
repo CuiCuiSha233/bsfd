@@ -210,6 +210,17 @@ func (e *Engine) SendRaw(peerID string, frame []byte) error {
 	return pc.sendRaw(frame)
 }
 
+// SendChunkResponse sends a chunk data response to the peer on the
+// same connection that would have handled the corresponding request,
+// ensuring inflight tracking is properly cleaned up.
+func (e *Engine) SendChunkResponse(peerID string, chunkIndex int, data []byte) error {
+	pc := e.pick(peerID, chunkIndex)
+	if pc == nil {
+		return fmt.Errorf("transport: no connection to %s", peerID)
+	}
+	return pc.sendChunkResponse(chunkIndex, data)
+}
+
 // Broadcast sends a message to every connected peer.
 func (e *Engine) Broadcast(msgType byte, msg interface{}) {
 	data, err := protocol.Encode(msgType, msg)
